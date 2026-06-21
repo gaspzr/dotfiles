@@ -1,0 +1,257 @@
+const fs = require("fs");
+const path = require("path");
+const ProvidePlugin = require("webpack").ProvidePlugin;
+const CopyWebPackPlugin = require("copy-webpack-plugin");
+const sharp = require("sharp");
+
+function deepCopy (obj) {
+  if (obj instanceof Array) {
+    return obj.slice();
+  }
+  const result = {};
+  Object.assign(result, obj);
+  Object.keys(result)
+    .filter(key => (typeof result[key]) === "object")
+    .forEach(key => result[key] = deepCopy(result[key]));
+  return result;
+};
+
+// Icon variants are pre-rendered at build time so the background script
+// (which becomes a service worker under MV3) doesn't need a canvas/DOM.
+const ICON_STATES = ["normal", "disabled", "error", "notification"];
+const ICON_SIZES = [16, 48, 128];
+
+function applyIconTransform(buf, state) {
+  switch (state) {
+    case "disabled":
+      for (let i = 0; i < buf.length; i += 4) {
+        if (buf[i + 3] === 0) continue;
+        const mean = Math.floor((buf[i] + buf[i + 1] + buf[i + 2]) / 3);
+        buf[i] = mean;
+        buf[i + 1] = mean;
+        buf[i + 2] = mean;
+      }
+      break;
+    case "error":
+      for (let i = 0; i < buf.length; i += 4) {
+        if (buf[i + 3] === 0) {
+          buf[i] = 255;
+          buf[i + 3] = 255;
+        }
+      }
+      break;
+    case "notification":
+      for (let i = 0; i < buf.length; i += 4) {
+        if (buf[i + 3] === 0) {
+          buf[i] = 255;
+          buf[i + 1] = 255;
+          buf[i + 3] = 255;
+        }
+      }
+      break;
+  }
+}
+
+async function renderIcon(svgContent, size, state) {
+  const resized = sharp(svgContent).resize(size, size);
+  if (state === "normal") {
+    return resized.png().toBuffer();
+  }
+  const { data, info } = await resized.raw().toBuffer({ resolveWithObject: true });
+  applyIconTransform(data, state);
+  return sharp(data, { raw: { width: info.width, height: info.height, channels: info.channels } })
+    .png()
+    .toBuffer();
+}
+
+function iconFileName(state, size) {
+  return state === "normal" ? `firenvim${size}.png` : `firenvim-${state}${size}.png`;
+}
+
+function iconPatterns(target_dir) {
+  return ICON_SIZES.flatMap(size => ICON_STATES.map(state => ({
+    from: "static/firenvim.svg",
+    to: () => path.join(target_dir, iconFileName(state, size)),
+    transform: (content) => renderIcon(content, size, state),
+  })));
+}
+
+const browserFiles = [
+  "src/manifest.json",
+  "src/options.html",
+  "src/index.html",
+  "src/browserAction.html",
+  "static/firenvim.svg",
+]
+
+const config = {
+  mode: "development",
+
+  entry: {
+    background: "./src/background.ts",
+    browserAction: "./src/browserAction.ts",
+    content: "./src/content.ts",
+    index: "./src/frame.ts",
+  },
+  output: {
+    filename: "[name].js",
+    // Overwritten by browser-specific config
+    // path: __dirname + "/target/extension",
+  },
+
+  // Enable sourcemaps for debugging webpack's output.
+  devtool: "inline-source-map",
+
+  resolve: {
+    // Add '.ts' and '.tsx' as resolvable extensions.
+    extensions: [".ts", ".tsx", ".js", ".json"],
+  },
+
+  module: {
+    rules: [
+      // Load ts files with ts-loader
+      { test: /\.tsx?$/, loader: "ts-loader" },
+      // For non-firefox browsers, we need to load a polyfill for the "browser"
+      // object. This polyfill is loaded through webpack's Provide plugin.
+      // Unfortunately, this plugin is pretty dumb and tries to provide an
+      // empty object named "browser" to the webextension-polyfill library.
+      // This results in the library not creating a browser object. The
+      // following line makes sure `browser` is undefined when
+      // webextension-polyfill is ran so that it can create a `browser` object.
+      // This is why we shouldn't load webextension-polyfill for firefox -
+      // otherwise we'd get a proxy instead of the real thing.
+      {
+        test: require.resolve("webextension-polyfill"),
+        use: [{
+          loader: "imports-loader",
+          options: {
+            additionalCode: 'browser = undefined;',
+          },
+        }]
+      }
+    ]},
+
+  // Overwritten by browser-specific config
+  plugins: [],
+}
+
+const package_json = JSON.parse(require("fs").readFileSync(path.join(__dirname, "package.json")))
+
+const chrome_target_dir = path.join(__dirname, "target", "chrome")
+const firefox_target_dir = path.join(__dirname, "target", "firefox")
+
+const chromeConfig = (config, env) => {
+  const result = Object.assign(deepCopy(config), {
+    output: {
+      path: chrome_target_dir,
+    },
+    plugins: [new CopyWebPackPlugin({ patterns: browserFiles.map(file => ({
+      from: file,
+      to: chrome_target_dir,
+      transform: (content, src) => {
+        if (path.basename(src) === "manifest.json") {
+          const manifest = JSON.parse(content.toString())
+          manifest["key"] = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk3pkgh862ElxtREZVPLxVNbiFWo9SnvZtZXZavNvs2GsUTY/mB9yHTPBGJiBMJh6J0l+F5JZivXDG7xdQsVD5t39CL3JGtt93M2svlsNkOEYIMM8tHbp69shNUKKjZOfT3t+aZyigK2OUm7PKedcPeHtMoZAY5cC4L1ytvgo6lge+VYQiypKF87YOsO/BGcs3D+MMdS454tLBuMp6LxMqICQEo/Q7nHGC3eubtL3B09s0l17fJeq/kcQphczKbUFhTVnNnIV0JX++UCWi+BP4QOpyk5FqI6+SVi+gxUosbQPOmZR4xCAbWWpg3OqMk4LqHaWpsBfkW9EUt6EMMMAfQIDAQAB";
+          manifest["version"] = package_json.version;
+          manifest["description"] = package_json.description;
+          manifest["icons"] = {
+            "128": "firenvim128.png",
+            "16": "firenvim16.png",
+            "48": "firenvim48.png"
+          }
+          manifest["manifest_version"] = 3;
+          manifest["background"] = { "service_worker": "background.js" };
+          manifest["action"] = manifest.browser_action;
+          delete manifest.browser_action;
+          delete manifest.action.browser_style;
+          manifest.action["default_icon"] = "firenvim128.png";
+          manifest["web_accessible_resources"] = [{
+            "resources": manifest.web_accessible_resources,
+            "matches": ["<all_urls>"]
+          }];
+          manifest["host_permissions"] = ["<all_urls>", "file:///*"];
+          manifest["permissions"] = manifest.permissions.filter(p => p !== "<all_urls>");
+          // MV3 forbids 'unsafe-eval'/'unsafe-inline' in extension_pages CSP.
+          // The default ('script-src \'self\'; object-src \'self\'') is what
+          // we'd set anyway and works for the testing build, since neither
+          // the runtime code nor the nyc-instrumented test code uses eval.
+          content = JSON.stringify(manifest, undefined, 3);
+        }
+        return content;
+      }
+    })).concat(iconPatterns(chrome_target_dir))}),
+      new ProvidePlugin({ "browser": "webextension-polyfill" })
+    ]
+  });
+  try {
+    fs.rmSync(result.output.path, { recursive: true })
+  } catch (e) {
+    console.log(`Could not delete output dir (${e.message})`);
+  }
+  return result;
+}
+
+const firefoxConfig = (config, env) => {
+  const result = Object.assign(deepCopy(config), {
+    output: {
+      path: firefox_target_dir,
+    },
+    plugins: [new CopyWebPackPlugin({
+      patterns: browserFiles.map(file => ({
+        from: file,
+        to: firefox_target_dir,
+        transform: (content, src) => {
+          switch(path.basename(src)) {
+            case "manifest.json":
+              const manifest = JSON.parse(content.toString());
+              manifest.browser_specific_settings = {
+                "gecko": {
+                  "id": "firenvim@lacamb.re",
+                  "strict_min_version": "128.0"
+                }
+              };
+              manifest.version = package_json.version;
+              manifest.description = package_json.description;
+              if (env.endsWith("testing")) {
+                manifest.content_security_policy = "script-src 'self' 'unsafe-eval'; object-src 'self';"
+              }
+              content = JSON.stringify(manifest, undefined, 3);
+          }
+          return content;
+        }
+      })).concat(iconPatterns(firefox_target_dir))
+    })]
+  });
+  try {
+    fs.rmSync(result.output.path, { recursive: true })
+  } catch (e) {
+    console.log(`Could not delete output dir (${e.message})`);
+  }
+  return result;
+}
+
+module.exports = args => {
+  let env = "";
+  if (args instanceof Object) {
+    delete args.WEBPACK_BUNDLE;
+    delete args.WEBPACK_BUILD;
+    const keys = Object.keys(args);
+    if (keys.length > 0) {
+      env = keys[0];
+    }
+  }
+
+  if (env.endsWith("testing")) {
+    config.entry.content = "./src/testing/content.ts";
+    config.entry.index = "./src/testing/frame.ts";
+    config.entry.background = "./src/testing/background.ts";
+  }
+
+  if (env.startsWith("chrome")) {
+    return [chromeConfig(config, env)];
+  } else if (env.startsWith("firefox")) {
+    return [firefoxConfig(config, env)];
+  }
+  return [chromeConfig(config, env), firefoxConfig(config, env)];
+}
+

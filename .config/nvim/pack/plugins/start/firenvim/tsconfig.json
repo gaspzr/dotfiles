@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "strictNullChecks": false,
+    "noImplicitAny": true,
+    "sourceMap": true,
+    "target": "ES2022",
+    "types": ["firefox-webext-browser", "jest"],
+    "alwaysStrict": true
+  },
+  "include": [
+    "./src/**/*"
+  ]
+}
