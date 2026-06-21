@@ -49,7 +49,7 @@ floating_modifier $mod
 tiling_drag modifier titlebar
 
 # start a terminal
-bindsym $mod+Return exec i3-sensible-terminal
+bindsym $mod+Return exec kitty # i3-sensible-terminal
 
 # kill focused window
 bindsym $mod+Shift+q kill
@@ -197,4 +197,4 @@ bindsym Mod4+Shift+s exec --no-startup-id flameshot gui
 bindsym Mod4+Shift+b exec floorp --new-tab "https://bevy.org/learn/quick-start/introduction/"
 bindsym Mod4+c exec floorp --new-tab "https://bevy-cheatbook.github.io/#how-to-use-this-book"
 
-include ~/.config/i3/config.local
+include /home/gas/.config/i3/config.local
